@@ -1,0 +1,465 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+;   Monotonic DSS loading - PM4Sand2D
+;   -----------------------------------------------------------------------------------------------
+;   Five elements at 5 different confiments subjected to monotonic strain-controlled shearing
+;   - exports 5 text files containing time histories for each element
+;   - exports 1 text file summarizing peak stress ratios and mobilized friction angles
+;   - option for drained or undrained loading
+;   -----------------------------------------------------------------------------------------------
+;   Ross W Boulanger & Katerina Ziotopoulou - 2025 May
+;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+model new
+model title "Monotonic undrained DSS"
+model configure dynamic 
+model configure fluid 
+model large-strain off
+
+def _version_checking
+   if version.code.major = 900
+      command
+       model configure plugins
+      endcommand
+   endif
+end
+[_version_checking]
+;--------------------------------------------------------------------------------------------------
+;	GENERAL INPUTS
+;--------------------------------------------------------------------------------------------------
+fish define _input_variables
+    _atm        = 101300.0  ; Atmospheric pressure
+    ;----------------------------------------------------------------------------------------------
+	; Primary parameters
+	; -  Correlations & procedures for estimating Dr and Go provided in the manual
+	_Dr 	= 0.63		; Field: Estimate from SPT or CPT data
+    _Go    	= 510		; Field: Calibrate to Vs data
+    _hpo    = 0.8		; Calibrate to obtain target CRR
+	;
+    ;----------------------------------------------------------------------------------------------
+	; Secondary input paramters (set to 0.0 to retain default values)
+	_ho     =  0.0     ; Defaults to value calculated as a function of Dr
+	_emin   =  0.0     ; Defaults to 0.5
+	_emax   =  0.0     ; Defaults to 0.8
+    _nb     =  0.0     ; Defaults to 0.5
+    _nd     =  0.0     ; Defaults to 0.1
+    _Ado    =  0.0     ; Defaults to value calculated to honor Bolton's relationship
+    _zmax   =  0.0     ; Defaults to value calculated as a function of the rel. state parameter
+    _cz     =  0.0     ; Defaults to 250
+    _ce     =  0.0     ; Defaults to value calculated as a function of Dr
+    _phicv  =  35.0     ; Defaults to 33 degrees
+    _pois   =  0.0     ; Defaults to 0.3
+    _Gdegr  =  0.0     ; Defaults to 2.0
+	_CDR    =  0.0     ; Defaults to value calculated as a function of Dr
+	_Ckaf   =  0.0     ; Defaults to value calculated as a function of Dr
+	_Q      =  0.0     ; Defaults to 10.0
+	_R      =  0.0     ; Defaults to 1.5
+	_m      =  0.0     ; Defaults to 0.01
+	_Fsed   =  0.0     ; Defaults to 0.04
+	_psedo  =  0.0     ; Defaults to -Patm/5
+	;
+    ;----------------------------------------------------------------------------------------------
+	; Water properties	
+    _waterK     = 2.0e9
+    _waterTens  = -10.0*_atm
+    _waterDens  = 1000.0
+	;
+    ;----------------------------------------------------------------------------------------------
+	; Soil density and porosity (required zone properties)
+	; -  Computed from above parameters as follows
+	_Gs			= 2.67	; Specific gravity
+	if _emin = 0.0
+	   _emin = 0.5
+	endif
+	if _emax = 0.0
+	   _emax = 0.8
+	endif
+	_void  		= _emax - _Dr*(_emax - _emin)
+    _dens_dry   = _Gs * _waterDens /(1.0+_void)  ; Dry density
+	; 
+    _poros      = _void/(1.0+_void)              ; Porosity
+    _dens       = _dens_dry *(1.0+_void/_Gs)     ; Saturated density
+	;
+	; Or specified directly
+    ; _poros      = 0.5
+    ; _dens       = 2000
+	;
+    ;----------------------------------------------------------------------------------------------
+	; Consolidation stress
+    array _sigv(5)
+    _sigv(1)    = 0.025  ; atmospheres
+    _sigv(2)    = 0.05
+    _sigv(3)    = 0.1
+    _sigv(4)    = 0.25
+    _sigv(5)    = 0.5
+    
+    _ko         = 0.5
+    
+    ;----------------------------------------------------------------------------------------------
+	; Loading parameters
+    _drained    = 0     ; Switch: 1 for drained, 0 for undrained
+    _maxStrain  = 0.1
+    
+    _maxStrInc  = 1.0e-5    ; Max strain increment per time step
+    _his_step   = int( 10 * (1.0e-5)/_maxStrInc )
+    
+    ;----------------------------------------------------------------------------------------------
+	; Output file base name
+	;
+    _basefile   = "mono_DSS_"
+
+end
+[_input_variables]
+
+;--------------------------------------------------------------------------------------------------
+;	END OF INPUTS NEEDED BY THE USER
+;--------------------------------------------------------------------------------------------------
+;   Create initial grid and initialize with 1D vertical loading
+;
+zone create2d quadrilateral size 9 1 
+
+fish def _nulling_depending_on_version
+    if version.code.major = 900 then
+        command
+            zone cmodel assign null range id-list 2 4 6 8
+        endcommand
+    else
+        command
+            zone null range id-list 2 4 6 8
+        endcommand
+    endif
+end
+[_nulling_depending_on_version]
+
+zone cmodel assign pm4sand2d range id-list 1 3 5 7 9 
+zone group "soil" range id-list 1 3 5 7 9
+zone face skin
+
+;--------------------------------------------------------------------------------------------------
+;   Boundary conditions for 1D consolidation to start
+;
+zone face apply velocity 0,0 range position-y 0
+zone face apply velocity-x 0 range position-y 1
+
+;--------------------------------------------------------------------------------------------------
+;   Assign soil properties
+;
+zone property ...
+    density [_dens] ...
+    D_r     [_Dr] ...
+    G_o     [_Go] ...
+    h_po    [_hpo] ...
+    range group "soil"
+;
+;   Secondary parameters input here for clarity
+;
+zone property ...
+    h_o     [_ho] ...
+    e_min   [_emin] ...
+    e_max   [_emax] ...
+    n_b     [_nb] ...
+    n_d     [_nd] ...
+    A_do    [_Ado] ...
+    z_max   [_zmax] ...
+    c_z     [_cz] ...
+    c_e     [_ce] ...
+    phi_cv  [_phicv] ...
+    pois    [_pois] ...
+    G_degr  [_Gdegr] ...
+    C_DR    [_CDR] ...
+    C_kaf   [_Ckaf] ...
+    Q_bolt  [_Q] ...
+    R_bolt  [_R] ...
+    m_par   [_m] ...
+    F_sed   [_Fsed] ...
+    p_sedo  [_psedo] ...
+    range group "soil"
+;
+;--------------------------------------------------------------------------------------------------
+;   Water properties and porosity
+;--------------------------------------------------------------------------------------------------
+
+zone fluid cmodel assign isotropic          range group "soil"
+zone fluid property porosity [_poros]       range group "soil"
+zone initialize fluid-density [_waterDens]  range group "soil"
+zone gridpoint initialize saturation 1.0    range group "soil"
+zone gridpoint initialize pore-pressure 0.0 range group "soil"
+
+fish def _water_depending_on_version
+    if version.code.major = 900
+        command
+           zone gridpoint initialize fluid-modulus 0            range group "soil"   ; Bulk set to zero for initialization        
+           zone gridpoint initialize fluid-tension [_waterTens] range group "soil"
+        endcommand
+    else
+        command
+           zone fluid property fluid-modulus 0               range group "soil"     ; Bulk set to zero for initialization 
+           zone fluid property effective-cutoff [_waterTens] range group "soil"
+        endcommand
+    endif
+end
+[_water_depending_on_version]
+
+;--------------------------------------------------------------------------------------------------
+;   Initialize stresses
+;
+zone initialize stress xx [-_ko*_sigv(1)*_atm] yy [-_sigv(1)*_atm] zz [-_ko*_sigv(1)*_atm] range id-list 1
+zone initialize stress xx [-_ko*_sigv(2)*_atm] yy [-_sigv(2)*_atm] zz [-_ko*_sigv(2)*_atm] range id-list 3
+zone initialize stress xx [-_ko*_sigv(3)*_atm] yy [-_sigv(3)*_atm] zz [-_ko*_sigv(3)*_atm] range id-list 5
+zone initialize stress xx [-_ko*_sigv(4)*_atm] yy [-_sigv(4)*_atm] zz [-_ko*_sigv(4)*_atm] range id-list 7
+zone initialize stress xx [-_ko*_sigv(5)*_atm] yy [-_sigv(5)*_atm] zz [-_ko*_sigv(5)*_atm] range id-list 9
+
+;--------------------------------------------------------------------------------------------------
+;   Zone face apply stress-normal 
+;
+zone face apply stress-normal [-_sigv(1)*_atm] range group "Top1"
+zone face apply stress-normal [-_sigv(2)*_atm] range group "Top2"
+zone face apply stress-normal [-_sigv(3)*_atm] range group "Top3"
+zone face apply stress-normal [-_sigv(4)*_atm] range group "Top4"
+zone face apply stress-normal [-_sigv(5)*_atm] range group "Top5"
+
+;--------------------------------------------------------------------------------------------------
+;	Solve for equilibrium
+;
+model dynamic active off
+model fluid active off
+model solve
+model save "initial"
+
+;--------------------------------------------------------------------------------------------------
+;   Histories to be recorded
+;
+history interval [_his_step]
+model history name "mRat" mechanical ratio
+model history name "mechtime" mechanical time
+
+zone history name "x1" displacement-x position 1 1 
+zone history name "x2" displacement-x position 3 1
+zone history name "x3" displacement-x position 5 1
+zone history name "x4" displacement-x position 7 1
+zone history name "x5" displacement-x position 9 1
+
+zone history name "pp1" pore-pressure source zone zoneid 1
+zone history name "pp2" pore-pressure source zone zoneid 3
+zone history name "pp3" pore-pressure source zone zoneid 5
+zone history name "pp4" pore-pressure source zone zoneid 7
+zone history name "pp5" pore-pressure source zone zoneid 9
+
+zone history name "esxx1" stress-effective quantity xx zoneid 1
+zone history name "esxx2" stress-effective quantity xx zoneid 3
+zone history name "esxx3" stress-effective quantity xx zoneid 5
+zone history name "esxx4" stress-effective quantity xx zoneid 7
+zone history name "esxx5" stress-effective quantity xx zoneid 9
+
+zone history name "esyy1" stress-effective quantity yy zoneid 1
+zone history name "esyy2" stress-effective quantity yy zoneid 3
+zone history name "esyy3" stress-effective quantity yy zoneid 5
+zone history name "esyy4" stress-effective quantity yy zoneid 7
+zone history name "esyy5" stress-effective quantity yy zoneid 9
+
+zone history name "sxy1" stress-effective quantity xy zoneid 1
+zone history name "sxy2" stress-effective quantity xy zoneid 3
+zone history name "sxy3" stress-effective quantity xy zoneid 5
+zone history name "sxy4" stress-effective quantity xy zoneid 7
+zone history name "sxy5" stress-effective quantity xy zoneid 9
+
+zone history name "eps_yy1" strain-increment quantity yy zoneid 1
+zone history name "eps_yy2" strain-increment quantity yy zoneid 3
+zone history name "eps_yy3" strain-increment quantity yy zoneid 5
+zone history name "eps_yy4" strain-increment quantity yy zoneid 7
+zone history name "eps_yy5" strain-increment quantity yy zoneid 9
+
+zone history name "ep1" stress-effective quantity mean zoneid 1
+zone history name "ep2" stress-effective quantity mean zoneid 3
+zone history name "ep3" stress-effective quantity mean zoneid 5
+zone history name "ep4" stress-effective quantity mean zoneid 7
+zone history name "ep5" stress-effective quantity mean zoneid 9
+
+zone history name "pp1b" pore-pressure position 0.5 0.5
+zone history name "pp2b" pore-pressure position 2.5 0.5
+zone history name "pp3b" pore-pressure position 4.5 0.5
+zone history name "pp4b" pore-pressure position 6.5 0.5
+zone history name "pp5b" pore-pressure position 8.5 0.5
+
+;--------------------------------------------------------------------------------------------------
+;   Reset Kwater prior to undrained shearing
+;--------------------------------------------------------------------------------------------------
+fish define _updateKwater
+    if _drained = 0 and version.code.major = 900 then
+        command
+            zone gridpoint initialize fluid-modulus [_waterK] range group "soil"
+        end_command
+    else if _drained = 0
+        command
+            zone fluid property fluid-modulus [_waterK] range group "soil"
+        endcommand
+    end_if
+end
+[_updateKwater]
+
+;--------------------------------------------------------------------------------------------------
+;   Reset boundary conditions for DSS shearing
+;	-  Attaching grippoints requires knowing the gridpoint ID or getting the ID from its coordinates
+;	-  Getting the ID requires first getting a pointer given the coordinates, and then the ID given the pointer
+;
+zone attach gridpointid [gp.id(gp.near(0.0,1.0))] to-gridpointid [gp.id(gp.near(1.0,1.0))] 
+zone attach gridpointid [gp.id(gp.near(2.0,1.0))] to-gridpointid [gp.id(gp.near(3.0,1.0))] 
+zone attach gridpointid [gp.id(gp.near(4.0,1.0))] to-gridpointid [gp.id(gp.near(5.0,1.0))] 
+zone attach gridpointid [gp.id(gp.near(6.0,1.0))] to-gridpointid [gp.id(gp.near(7.0,1.0))] 
+zone attach gridpointid [gp.id(gp.near(8.0,1.0))] to-gridpointid [gp.id(gp.near(9.0,1.0))] 
+
+;--------------------------------------------------------------------------------------------------
+;   Solve for equilibrium in static mode and then in dynamic mode
+;
+model solve
+
+model dynamic active on
+model dynamic time-total 0.0
+zone dynamic damping rayleigh 0.005 1.0
+
+solve  ; Need to get the dt established for use in computing the loading rate below
+
+zone gridpoint initialize displacement 0.0 0.0
+
+;--------------------------------------------------------------------------------------------------
+;   Apply shearing and compute fish history variables
+;
+[_dt = dynamic.timestep]
+[_capVel = _maxStrInc/_dt]
+[_time   = _maxStrain / _capVel]
+zone face apply velocity-x [_capVel] range position-y 1
+
+fish define _arrays
+    array _eps_xy(5) _SR(5) _sigvRatio(5) _peakTau(5) _peakSR(5)
+end
+[_arrays]
+
+fish define _fishHistories
+    loop _n (1,5)
+        _xMidZone = 0.5 +2*(_n-1)
+        _eps_xy(_n) = gp.disp.x(gp.near(2.0*_n-1,1.0))  ; Engineering strain assuming grid has unit height
+        _SR(_n) = -zone.stress.effective.xy(zone.near(_xMidZone,0.5))/(zone.stress.effective.yy(zone.near(_xMidZone,0.5)))
+        _sigvRatio(_n) = -zone.stress.effective.yy(zone.near(_xMidZone,0.5))/(_sigv(_n)*_atm)
+        _peakTau(_n) = math.max(math.abs(zone.stress.effective.xy(zone.near(_xMidZone,0.5))),_peakTau(_n))
+        _peakSR(_n) = math.max(_SR(_n),_peakSR(_n))
+    end_loop
+    
+    _sr_1 = _SR(1)
+    _sr_2 = _SR(2)
+    _sr_3 = _SR(3)
+    _sr_4 = _SR(4)
+    _sr_5 = _SR(5)
+
+    _eps_xy_1 = _eps_xy(1)
+    _eps_xy_2 = _eps_xy(2)
+    _eps_xy_3 = _eps_xy(3)
+    _eps_xy_4 = _eps_xy(4)
+    _eps_xy_5 = _eps_xy(5)
+
+    _svRat_1 = _sigvRatio(1)
+    _svRat_2 = _sigvRatio(2)
+    _svRat_3 = _sigvRatio(3)
+    _svRat_4 = _sigvRatio(4)
+    _svRat_5 = _sigvRatio(5)
+    
+end
+
+fish callback add _fishHistories -100 
+
+;--------------------------------------------------------------------------------------------------
+;	Additional histories
+;
+fish history name "sr1" _sr_1
+fish history name "sr2" _sr_2
+fish history name "sr3" _sr_3
+fish history name "sr4" _sr_4
+fish history name "sr5" _sr_5
+
+fish history name "eps_xy1" _eps_xy_1
+fish history name "eps_xy2" _eps_xy_2
+fish history name "eps_xy3" _eps_xy_3
+fish history name "eps_xy4" _eps_xy_4
+fish history name "eps_xy5" _eps_xy_5
+
+fish history name "svRat1" _svRat_1
+fish history name "svRat2" _svRat_2
+fish history name "svRat3" _svRat_3
+fish history name "svRat4" _svRat_4
+fish history name "svRat5" _svRat_5
+
+;--------------------------------------------------------------------------------------------------
+;   Impose monotonic loading
+;   -  Solve for his_steps without loading so the histories include the the initial conditions
+;
+zone face apply velocity-x 0.0 range position-y 1  
+model dynamic time-total 0.0
+model solve time [_his_step*_dt]
+
+zone face apply velocity-x [_capVel] range position-y 1  
+model dynamic time-total 0.0
+model solve time [_time]
+
+;--------------------------------------------------------------------------------------------------
+;   Outputting of time histories for the 5 elements
+;
+fish define _five_files
+    loop _n (1,5)
+        _tableName1 = "Table1"
+        _tableName2 = "Table2"
+        _tableName3 = "Table3"
+        
+        _eps_xyName = string.build("eps_xy%1",_n)
+        _eps_yyName = string.build("eps_yy%1",_n)
+        _sxyName = string.build("sxy%1",_n)
+        _srName  = string.build("sr%1",_n)
+        _esyyName= string.build("esyy%1",_n)
+        _svRatName = string.build("svRat%1",_n)
+        
+        command
+            history export [_eps_yyName] vs [_eps_xyName] table [_tableName1] 
+            history export [_srName] vs [_sxyName] table [_tableName2] 
+            history export [_svRatName] vs [_esyyName] table [_tableName3] 
+        end_command
+
+        local fout = file.open(string.build("%1%2.csv",_basefile,_n),"write","text")
+        local lineOut = "Shear strain (%), Vert strain (%), Shear stress (atm), Shear stress ratio, Vert eff stress (atm), Vert eff stress ratio"
+        local listOut = list
+        listOut = list.append(listOut,lineOut)
+ 
+        _numRows = table.size(_tableName1)
+        loop _ih (1,_numRows)
+            lineOut = string.build("%1, %2, %3, %4, %5, %6", 100*table.x(_tableName1,_ih),-100*table.y(_tableName1,_ih), ...
+                table.x(_tableName2,_ih)/_atm,table.y(_tableName2,_ih),-table.x(_tableName3,_ih)/_atm,table.y(_tableName3,_ih))
+            listOut = list.append(listOut,lineOut)
+        end_loop
+        
+        file.write(fout,listOut)
+        file.close(fout)
+        
+    end_loop
+end
+[_five_files]
+
+;--------------------------------------------------------------------------------------------------
+;   Output the summary file of peak resistances
+;
+fish define _summary
+    local _f = file.open(_basefile + "peak_strengths.csv","write","text")
+    local _l = list
+    local _a = "Element #, Vert consol stress (atm), Peak shear stress (atm), Peak tau/svc', Peak tau/sv', Peak eff friction angle (if c=0)"
+    _l = list.append(_l,_a)
+    loop _n (1,5)
+        _peakTauSvc = _peakTau(_n)/(_sigv(_n)*_atm)
+        _peakPhi = math.atan(_peakSR(_n))*180.0/3.14159
+        _a = string.build("%1, %2, %3, %4, %5, %6",_n,_sigv(_n), _peakTau(_n)/_atm, _peakTauSvc, _peakSR(_n), _peakPhi)
+        _l = list.append(_l,_a)
+end_loop
+    file.write(_f,_l)
+    file.close(_f)
+end
+[_summary]
+
+;--------------------------------------------------------------------------------------------------
+;
+model save "sheared"

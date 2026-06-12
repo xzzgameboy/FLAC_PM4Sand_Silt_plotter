@@ -1,0 +1,648 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+;   Cyclic DSS loading - PM4Silt2D
+;   -----------------------------------------------------------------------------------------------
+;   Five elements subjected to different cyclic stress ratios
+;   - strain controlled loading with reversal based on cyclic stress ratio
+;   - exports 5 text files containing time histories for each element
+;   - exports 1 text file summarizing number of cycles to different failure criteria for each CSR
+;   - option for drained or undrained loading
+;   -----------------------------------------------------------------------------------------------
+;   Ross W Boulanger & Katerina Ziotopoulou - 2024 
+;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+model new
+model title "Cyclic undrained DSS"
+model configure dynamic 
+model configure fluid 
+model configure plugins
+model large-strain off
+
+;--------------------------------------------------------------------------------------------------
+;	GENERAL INPUTS
+;--------------------------------------------------------------------------------------------------
+fish define $input_variables
+    $atm        = 101300.0  ; Atmospheric pressure
+    ;----------------------------------------------------------------------------------------------
+	; Primary parameters
+	; -  Correlations & procedures for estimating parameters are discussed in the manual
+	$Go           = 500   
+	$SuRat        = 0.25
+	$Su           = 0.0  ; set to 0.0 for $SuRat based estimate. Otherwise, overides any specified SuRat
+	$hpo          = 20.   
+	;
+    ;----------------------------------------------------------------------------------------------
+	; Secondary input paramters (set to 0.0 to retain default values)
+    $eo           = 0.0  ; Defaults to 0.9
+	$Gexp		  = 0.0  ; Defaults to 0.75 if equal to 0
+	$ruMax        = 0.0  ; Default logic listed in manual
+	$nbwet        = 0.0  ; Default is 0.8.  Must be <=1.0 and >0.0. 
+	$nbdry        = 0.0  ; Defaults to 0.5
+	$nd           = 0.0  ; Defaults to 0.3
+	$Ado          = 0.0  ; Default is 0.8
+	$ho           = 0.0  ; Default is 0.5
+	$zmax         = 0.0  ; Default is 10 < 40SuRat < 20
+	$cz           = 0.0  ; Default is 100
+	$ce           = 0.0  ; Default varies from 0.5 to 1.1 for SuRat at 0.25 to 0.75
+	$CGdegrad     = 0.0  ; Default is 3
+	$phicv        = 0.0  ; Default is 32 degrees
+	$lamda        = 0.0  ; Default is 0.06
+	$Ckaf         = 0.0  ; Default is 4.0
+	$Su_factor_1  = 0.0  ; Default is 1.0 at initialization 
+	;
+    ; Flag to update initial backstresses/history after applying a static shear stress bias
+    $flag_on_FirstCall = 0 ; = 0 sets history after static bias; != 0 retains history from 1D consol
+    ;
+    ;----------------------------------------------------------------------------------------------
+	; Water properties	
+    $waterK     = 2.0e9
+    $waterTens  = -1.0*$atm
+    $waterDens  = 1000.0
+	;
+    ;----------------------------------------------------------------------------------------------
+	; Soil density and porosity (required zone properties)
+	$Gs			= 2.67	; Specific gravity
+    if $eo = 0.0
+		$eo = 0.9
+	endif
+    $poros      = $eo/(1.0+$eo)              ; Porosity
+    $dens_dry   = $Gs * $waterDens /(1.0+$eo)  ; Dry density
+	$dens       = $dens_dry *(1.0+$eo/$Gs)     ; Saturated density
+	;
+	; Or specified directly
+    ; $poros      = 0.5
+    ; $dens       = 2000
+	;
+    ;----------------------------------------------------------------------------------------------
+	; Consolidation stress
+    $sigv           = 1.0  ; atmospheres
+    $ko             = 0.5
+	;
+    ;----------------------------------------------------------------------------------------------
+	; Cyclic loading parameters
+    $csr            = 0.2
+    $static_bias	= 0.0
+    
+	array $Strain_stop(5)      
+	$Strain_stop(1) = 0.005
+	$Strain_stop(2) = 0.01
+	$Strain_stop(3) = 0.03
+	$Strain_stop(4) = 0.06
+	$Strain_stop(5) = 0.08
+
+    $maxCycles	= 100
+	$PostShake    = 1		; 1 for executing Post_Shake = 1 at end of cyclic loading
+
+    $maxStrInc  = 1.0e-5    ; Max strain increment per time step
+    $his_step   = int(40 * (1.0e-5)/$maxStrInc ) ; Avoids large files at slow loading rates
+    
+    ;----------------------------------------------------------------------------------------------
+	; Output file base name
+	;
+    $basefile   = "cyclic_DSS_"
+
+end
+[$input_variables]
+
+;--------------------------------------------------------------------------------------------------
+;	END OF INPUTS NEEDED BY THE USER
+;--------------------------------------------------------------------------------------------------
+;   Create initial grid and initialize with 1D vertical loading
+;
+zone create2d quadrilateral size 9 1 
+zone cmodel assign null range id-list 2 4 6 8
+zone cmodel assign pm4silt2d range id-list 1 3 5 7 9 
+zone group "soil" range id-list 1 3 5 7 9
+zone face skin
+
+;--------------------------------------------------------------------------------------------------
+;   Boundary conditions for 1D consolidation to start
+;
+zone face apply velocity 0,0 range position-y 0
+zone face apply velocity-x 0 range position-y 1
+
+;--------------------------------------------------------------------------------------------------
+;   Assign soil properties
+;
+zone property ...
+    density [$dens] ...
+    G_o     [$Go] ...
+	Su_Rat	[$SuRat] ...
+	S_u		[$Su] ...
+    h_po    [$hpo] ...
+    range group "soil"
+;
+;   Secondary parameters input here for clarity
+;
+zone property ...
+    e_o   	[$eo] ...
+    G_exp	[$Gexp] ...
+	ru_max 	[$ruMax] ...
+	n_bwet	[$nbwet] ...
+	n_bdry	[$nbdry] ...
+	n_d		[$nd] ...
+	h_o     [$ho] ...
+    z_max   [$zmax] ...
+	c_z     [$cz] ...
+	c_e     [$ce] ...
+	G_degr  [$CGdegrad] ...
+	A_do    [$Ado] ...
+    phi_cv  [$phicv] ...
+	lamda	[$lamda] ...
+	Ckaf    [$Ckaf] ...
+	Su_factor [$Su_factor_1] ...
+    range group "soil"
+;
+;--------------------------------------------------------------------------------------------------
+;   Water properties and porosity
+;
+zone fluid cmodel assign isotropic range group "soil"
+zone fluid property porosity [$poros] range group "soil"
+
+zone initialize fluid-density [$waterDens] range group "soil"
+zone gridpoint initialize saturation 1.0 range group "soil"
+zone gridpoint initialize fluid-modulus 0 range group "soil"                ; Bulk set to zero for initialization 
+zone gridpoint initialize fluid-tension [$waterTens] range group "soil"
+zone gridpoint initialize pore-pressure 0.0 range group "soil"
+
+;--------------------------------------------------------------------------------------------------
+;   Initialize stresses
+;
+zone initialize stress xx [-$ko*$sigv*$atm] yy [-$sigv*$atm] zz [-$ko*$sigv*$atm] range id-list 1
+zone initialize stress xx [-$ko*$sigv*$atm] yy [-$sigv*$atm] zz [-$ko*$sigv*$atm] range id-list 3
+zone initialize stress xx [-$ko*$sigv*$atm] yy [-$sigv*$atm] zz [-$ko*$sigv*$atm] range id-list 5
+zone initialize stress xx [-$ko*$sigv*$atm] yy [-$sigv*$atm] zz [-$ko*$sigv*$atm] range id-list 7
+zone initialize stress xx [-$ko*$sigv*$atm] yy [-$sigv*$atm] zz [-$ko*$sigv*$atm] range id-list 9
+
+;--------------------------------------------------------------------------------------------------
+;   Zone face apply stress-normal 
+;
+zone face apply stress-normal [-$sigv*$atm] range group "Top1"
+zone face apply stress-normal [-$sigv*$atm] range group "Top2"
+zone face apply stress-normal [-$sigv*$atm] range group "Top3"
+zone face apply stress-normal [-$sigv*$atm] range group "Top4"
+zone face apply stress-normal [-$sigv*$atm] range group "Top5"
+
+;--------------------------------------------------------------------------------------------------
+;	Solve for equilibrium in static mode and then in dynamic
+;   -  Also sets initial back-stresses and other history terms for model
+;
+model dynamic active off
+model solve
+model save "initial"
+
+model dynamic active on
+zone dynamic damping rayleigh 0.005 1.0
+
+solve  ; Establishes dt for use in computing the loading rate below
+
+;--------------------------------------------------------------------------------------------------
+;   Reset boundary conditions for DSS shearing
+;	-  Attaching grippoints requires knowing the gridpoint ID or getting the ID from its coordinates
+;	-  Getting the ID requires first getting a pointer given the coordinates, and then the ID given the pointer
+;
+zone attach gridpointid [gp.id(gp.near(0.0,1.0))] to-gridpointid [gp.id(gp.near(1.0,1.0))] 
+zone attach gridpointid [gp.id(gp.near(2.0,1.0))] to-gridpointid [gp.id(gp.near(3.0,1.0))] 
+zone attach gridpointid [gp.id(gp.near(4.0,1.0))] to-gridpointid [gp.id(gp.near(5.0,1.0))] 
+zone attach gridpointid [gp.id(gp.near(6.0,1.0))] to-gridpointid [gp.id(gp.near(7.0,1.0))] 
+zone attach gridpointid [gp.id(gp.near(8.0,1.0))] to-gridpointid [gp.id(gp.near(9.0,1.0))] 
+
+;--------------------------------------------------------------------------------------------------
+;	Impose static shear stress bias 
+;   -  All 5 zones should respond identically, so loop tests criteria on 1st zone only
+;
+[$dt = dynamic.timestep]
+[$capVel = $maxStrInc/$dt]
+zone face apply velocity-x [$capVel] range position-y 1  
+model dynamic time-total 0.0
+
+fish define $apply_static
+    $maxSteps = 1/$maxStrInc
+    loop $nt (1,$maxSteps)
+        $static_SR = zone.stress.effective.xy(zone.near(0.5,0.5))/($sigv*$atm)
+        $time = dynamic.time + $dt
+        if $static_SR > $static_bias
+            exit
+        else
+            command
+                model solve time [$time]
+            end_command
+        end_if
+    end_loop
+    ; Optional to reset the initial back-stress ratios 
+    if $flag_on_FirstCall = 0
+        command
+            zone property First_Call 0 range group "soil"
+        end_command
+    end_if
+end
+[$apply_static]
+
+;--------------------------------------------------------------------------------------------------
+;   Reset Kwater prior to undrained shearing
+; 
+zone gridpoint initialize fluid-modulus [$waterK] range group "soil"
+
+;--------------------------------------------------------------------------------------------------
+;   Resets prior to starting cyclic loading
+;   -  Set displacements to start for zero for stress-strain responses
+
+zone gridpoint initialize displacement 0.0 0.0
+
+model save "initial_w_bias"
+
+;--------------------------------------------------------------------------------------------------
+;   Histories to be recorded
+;
+history interval [$his_step]
+model history name "mRat" mechanical ratio
+model history name "dyntime" dynamic time-total
+
+zone history name "x1" displacement-x position 1 1 
+zone history name "x2" displacement-x position 3 1
+zone history name "x3" displacement-x position 5 1
+zone history name "x4" displacement-x position 7 1
+zone history name "x5" displacement-x position 9 1
+
+zone history name "pp1" pore-pressure source zone zoneid 1
+zone history name "pp2" pore-pressure source zone zoneid 3
+zone history name "pp3" pore-pressure source zone zoneid 5
+zone history name "pp4" pore-pressure source zone zoneid 7
+zone history name "pp5" pore-pressure source zone zoneid 9
+
+zone history name "esxx1" stress-effective quantity xx zoneid 1
+zone history name "esxx2" stress-effective quantity xx zoneid 3
+zone history name "esxx3" stress-effective quantity xx zoneid 5
+zone history name "esxx4" stress-effective quantity xx zoneid 7
+zone history name "esxx5" stress-effective quantity xx zoneid 9
+
+zone history name "esyy1" stress-effective quantity yy zoneid 1
+zone history name "esyy2" stress-effective quantity yy zoneid 3
+zone history name "esyy3" stress-effective quantity yy zoneid 5
+zone history name "esyy4" stress-effective quantity yy zoneid 7
+zone history name "esyy5" stress-effective quantity yy zoneid 9
+
+zone history name "sxy1" stress-effective quantity xy zoneid 1
+zone history name "sxy2" stress-effective quantity xy zoneid 3
+zone history name "sxy3" stress-effective quantity xy zoneid 5
+zone history name "sxy4" stress-effective quantity xy zoneid 7
+zone history name "sxy5" stress-effective quantity xy zoneid 9
+
+zone history name "eps_yy1" strain-increment quantity yy zoneid 1
+zone history name "eps_yy2" strain-increment quantity yy zoneid 3
+zone history name "eps_yy3" strain-increment quantity yy zoneid 5
+zone history name "eps_yy4" strain-increment quantity yy zoneid 7
+zone history name "eps_yy5" strain-increment quantity yy zoneid 9
+
+zone history name "ep1" stress-effective quantity mean zoneid 1
+zone history name "ep2" stress-effective quantity mean zoneid 3
+zone history name "ep3" stress-effective quantity mean zoneid 5
+zone history name "ep4" stress-effective quantity mean zoneid 7
+zone history name "ep5" stress-effective quantity mean zoneid 9
+
+;--------------------------------------------------------------------------------------------------
+;   Define function for applying cyclic loads and computing fish variables
+;
+[$dt = dynamic.timestep]
+[$capVel = $maxStrInc/$dt]
+zone face apply velocity-x [$capVel] range position-y 1  
+
+fish define $arrays
+    array $Liq_1(5) $Liq_2(5) $Liq_3(5) $cycNum(5) $eps_xy(5) $eps_xyMax(5) $SR(5) $SRLast(5) $ru(5) $ruMax(5) $sigvRatio(5)
+end
+[$arrays]
+
+fish define $CSR_calcs
+    loop $n (1,5)
+        $xMidZone = 0.5+2*($n-1)
+        $ru($n) = 1 + zone.stress.effective.yy(zone.near($xMidZone,0.5))/($sigv*$atm)
+        $ruMax($n) = math.max($ru($n),$ruMax($n))
+        $sigvRatio($n) = -zone.stress.effective.yy(zone.near($xMidZone,0.5))/($sigv*$atm)
+        $eps_xy($n) = gp.disp.x(gp.near(2.0*$n-1,1.0))  ; Engineering strain assuming grid has unit height
+        $eps_xyMax($n) = math.max(math.abs($eps_xy($n)),$eps_xyMax($n))
+        $SR($n) = zone.stress.effective.xy(zone.near($xMidZone,0.5))/($sigv*$atm)
+        
+        if $SR($n) > $csr + $static_bias
+            if $SRLast($n) <= $static_bias
+                ; Note for discussion with Itasca: The following commands do not work properly.
+                ;   I can set a gp vel, and it holds for the rest of a solve command, but it goes back to zero after the next solve command is executed.
+                ;   gp.vel.x(gp.near($xMidZone-0.5,1.0)) = -$capVel
+                ;   gp.vel.x(gp.near($xMidZone+0.5,1.0)) = -$capVel
+                command
+                    zone face apply velocity-x [-$capVel] range position-x [$xMidZone-0.5] [$xMidZone+0.5] position-y 1.0
+                end_command
+                $cycNum($n) = $cycNum($n)+0.5
+                $SRLast($n) = $SR($n)
+            end_if
+        end_if
+        
+        if $SR($n) < -$csr + $static_bias
+            if $SRLast($n) >= $static_bias
+                command
+                    zone face apply velocity-x [$capVel] range position-x [$xMidZone-0.5] [$xMidZone+0.5] position-y 1.0
+                end_command
+                $cycNum($n) = $cycNum($n)+0.5
+                $SRLast($n) = $SR($n)
+            end_if
+        end_if
+
+        if $ruMax($n) < 0.98                       ; ru > 98%
+            $Liq_1($n) = $cycNum($n) + 0.5
+        end_if
+        if $eps_xyMax($n) < 0.01                    ; 1% shear strain
+            $Liq_2($n) = $cycNum($n) + 0.5
+        end_if
+        if $eps_xyMax($n) < 0.03                    ; 3% shear strain
+            $Liq_3($n) = $cycNum($n) + 0.5
+        end_if
+        if $eps_xyMax($n) > $Strain_stop($n)
+            $tau_diff = math.abs($SR($n) - $static_bias)
+            if $tau_diff < 0.005
+                command
+                    zone face apply velocity-x 0.0 range position-x [$xMidZone-0.5] [$xMidZone+0.5] position-y 1.0
+                end_command
+            else
+                if $SR($n) > $static_bias
+                    command
+                        zone face apply velocity-x [-$capVel] range position-x [$xMidZone-0.5] [$xMidZone+0.5] position-y 1.0
+                    end_command
+                else
+                    command
+                        zone face apply velocity-x [$capVel] range position-x [$xMidZone-0.5] [$xMidZone+0.5] position-y 1.0
+                    end_command
+                end_if
+            end_if
+        end_if
+        
+    end_loop
+
+    $csr_1 = $SR(1)
+    $csr_2 = $SR(2)
+    $csr_3 = $SR(3)
+    $csr_4 = $SR(4)
+    $csr_5 = $SR(5)
+    
+    $cycN_1 = $cycNum(1)
+    $cycN_2 = $cycNum(2)
+    $cycN_3 = $cycNum(3)
+    $cycN_4 = $cycNum(4)
+    $cycN_5 = $cycNum(5)
+    
+    $ru_1 = $ru(1)
+    $ru_2 = $ru(2)
+    $ru_3 = $ru(3)
+    $ru_4 = $ru(4)
+    $ru_5 = $ru(5)
+    
+    $eps_xy_1 = $eps_xy(1)
+    $eps_xy_2 = $eps_xy(2)
+    $eps_xy_3 = $eps_xy(3)
+    $eps_xy_4 = $eps_xy(4)
+    $eps_xy_5 = $eps_xy(5)
+
+    $svRat_1 = $sigvRatio(1)
+    $svRat_2 = $sigvRatio(2)
+    $svRat_3 = $sigvRatio(3)
+    $svRat_4 = $sigvRatio(4)
+    $svRat_5 = $sigvRatio(5)
+
+end
+
+fish callback add $CSR_calcs -100 
+
+;--------------------------------------------------------------------------------------------------
+;	Additional histories
+;
+fish history name "csr1" $csr_1
+fish history name "csr2" $csr_2
+fish history name "csr3" $csr_3
+fish history name "csr4" $csr_4
+fish history name "csr5" $csr_5
+
+fish history name "cycNum1" $cycN_1
+fish history name "cycNum2" $cycN_2
+fish history name "cycNum3" $cycN_3
+fish history name "cycNum4" $cycN_4
+fish history name "cycNum5" $cycN_5
+
+fish history name "ru1" $ru_1
+fish history name "ru2" $ru_2
+fish history name "ru3" $ru_3
+fish history name "ru4" $ru_4
+fish history name "ru5" $ru_5
+
+fish history name "eps_xy1" $eps_xy_1
+fish history name "eps_xy2" $eps_xy_2
+fish history name "eps_xy3" $eps_xy_3
+fish history name "eps_xy4" $eps_xy_4
+fish history name "eps_xy5" $eps_xy_5
+
+fish history name "svRat1" $svRat_1
+fish history name "svRat2" $svRat_2
+fish history name "svRat3" $svRat_3
+fish history name "svRat4" $svRat_4
+fish history name "svRat5" $svRat_5
+
+;--------------------------------------------------------------------------------------------------
+;   Impose cyclic loading
+;   -  Solve for his_steps without loading so the histories include the the initial conditions
+;
+zone face apply velocity-x 0.0 range position-y 1  
+model dynamic time-total 0.0
+model solve time [$his_step*$dt]
+
+zone face apply velocity-x [$capVel] range position-y 1  
+
+program echo off
+
+fish define $CSR_loading
+    loop $nt (1,10000000)
+        if gp.vel.x(gp.near(9.0,1.0)) != 0.0
+            $time = dynamic.time + 10*$his_step*$dt
+            command
+                model solve time [$time]
+            end_command
+        end_if
+    end_loop
+end
+[$CSR_loading]
+
+program echo on
+
+;--------------------------------------------------------------------------------------------------
+;
+model save "cyclic_loaded"
+
+;--------------------------------------------------------------------------------------------------
+;   Outputting of time histories for the 5 elements
+;   -  Approximate interpolation of a smooth 'cycle number" as a float rather than stepped integer
+;
+fish define $five_files
+    loop $n (1,5)
+        $tableName1 = "Table1"
+        $tableName2 = "Table2"
+        $tableName3 = "Table3"
+        
+        $cycNumName = string.build("cycNum%1",$n)
+        $csrName = string.build("csr%1",$n)
+        $eps_xyName = string.build("eps_xy%1",$n)
+        $esyyName= string.build("esyy%1",$n)
+        $ruName  = string.build("ru%1",$n)
+        $svRatName = string.build("svRat%1",$n)
+
+        command
+            history export [$csrName] vs [$cycNumName] table [$tableName1] 
+            history export [$esyyName] vs [$eps_xyName] table [$tableName2] 
+            history export [$ruName] vs [$svRatName] table [$tableName3] 
+        end_command
+
+        $numRows = table.size($tableName1)
+        $ifirst = 1
+        $firstN = table.x($tableName1,$ifirst)
+        loop $ih (1,$numRows)
+            $tempN = table.x($tableName1,$ih) - 0.25
+            if $tempN > $firstN | $ih == $numrows
+                if $ih == $numrows
+                    $tempN = table.x($tableName1,$ih)
+                end_if               
+                $ilast = $ih
+                $lastN = $tempN
+                loop $ifix ($ifirst,$ilast)
+                    table.x($tableName1,$ifix) = $firstN + ($lastN - $firstN)*($ifix - $ifirst)/ ($ilast - $ifirst)
+                end_loop
+                $firstN = $lastN
+                $ifirst = $ilast
+            end_if
+        end_loop
+ 
+        local fout = file.open(string.build("%1%2.csv",$basefile,$n),"write","text")
+        local lineOut = "Cycle num, CSR, Shear strain (%), Vert eff stress (atm), Vert eff stress ratio, ru"
+        local listOut = list
+        listOut = list.append(listOut,lineOut)
+ 
+        loop $ih (1,$numRows)
+            lineOut = string.build("%1, %2, %3, %4, %5, %6", table.x($tableName1,$ih),table.y($tableName1,$ih), ...
+                100*table.x($tableName2,$ih),-table.y($tableName2,$ih)/$atm,table.x($tableName3,$ih),table.y($tableName3,$ih))
+            listOut = list.append(listOut,lineOut)
+        end_loop
+        
+        file.write(fout,listOut)
+        file.close(fout)
+        
+    end_loop
+end
+[$five_files]
+
+;--------------------------------------------------------------------------------------------------
+;   Alternative approach to outputting histories
+;   - This is more concise, but cannot include the interpolated cycle number, so not used. 
+;
+;[$file1 = $basefile + "1.his"]
+;[$file2 = $basefile + "2.his"]
+;[$file3 = $basefile + "3.his"]
+;[$file4 = $basefile + "4.his"]
+;[$file5 = $basefile + "5.his"]
+;
+;history export "csr1" "eps_xy1" "esyy1" "ru1" "dyntime" vs "cycNum1" file [$file1] truncate 
+;history export "csr2" "eps_xy2" "esyy2" "ru2" "dyntime" vs "cycNum2" file [$file2] truncate 
+;history export "csr3" "eps_xy3" "esyy3" "ru3" "dyntime" vs "cycNum3" file [$file3] truncate 
+;history export "csr4" "eps_xy4" "esyy4" "ru4" "dyntime" vs "cycNum4" file [$file4] truncate 
+;history export "csr5" "eps_xy5" "esyy5" "ru5" "dyntime" vs "cycNum5" file [$file5] truncate 
+
+;--------------------------------------------------------------------------------------------------
+;   Output summary file of number of cycles to different failure criteria
+;
+fish define $summary
+    local $f = file.open($basefile + "CSR_N.csv","write","text")
+    local $l = list
+    local $a = "CSR, N cycles to ru>98%, N cycles to 1% shear strain, N cycles to 3% shear strain"
+    $l = list.append($l,$a)
+    loop $n (1,5)
+        $a = string.build("%1,%2,%3,%4",$csr,$Liq_1($n),$Liq_2($n),$Liq_3($n))
+        $l = list.append($l,$a)
+        
+        table("criteria_1",$csr) = $Liq_1($n)
+        table("criteria_2",$csr) = $Liq_2($n)
+        table("criteria_3",$csr) = $Liq_3($n)
+
+    end_loop
+    file.write($f,$l)
+    file.close($f)
+end
+[$summary]
+
+;--------------------------------------------------------------------------------------------------
+;   Reconsolidation
+;
+fish callback remove $CSR_calcs -100 
+
+zone gridpoint initialize fluid-modulus 0 range group "soil"  ; Bulk set to zero for reconsolidation
+
+zone face apply velocity-x 0.0 range position-y 1  
+
+zone gridpoint free velocity-x range position-y 1.0
+
+zone face apply velocity-y [-$capVel/100] range position-y 1 
+
+fish define $postShakeOrNot
+    if $PostShake = 1
+        command
+            zone property Post_Shake [$PostShake] range group "soil"
+        end_command
+    end_if
+end
+[$postShakeOrNot]
+
+program echo off
+
+fish define $reconsol
+    loop $nt (1,10000000)
+        $num_done = 0
+        loop $n (1,5)
+            $xMidZone = 0.5+2*($n-1)
+            $ru = 1 + zone.stress.effective.yy(zone.near($xMidZone,0.5))/($sigv*$atm)
+            if $ru <= 0.0
+                command
+                    zone face apply velocity-y 0.0 range position-x [$xMidZone-0.5] [$xMidZone+0.5] position-y 1.0
+                end_command
+                $num_done = $num_done + 1
+            end_if
+        end_loop
+        if $num_done < 5
+            $time = dynamic.time + 10*$his_step*$dt
+            command
+                model solve time [$time]
+            end_command
+        else
+            exit
+        end_if
+    end_loop
+end
+[$reconsol]
+
+program echo on
+
+;--------------------------------------------------------------------------------------------------
+;   Output summary file of volumentric strain on reconsolidation
+;
+fish define $summary
+    local $f = file.open($basefile + "reconsol_strains.csv","write","text")
+    local $l = list
+    local $a = "SuRat, Vert consol stress (atm), Max shear strain (%), Vol strain (%)"
+    $l = list.append($l,$a)
+    loop $n (1,5)
+        $xMidZone = 0.5+2*($n-1)
+        $vol_strain = -zone.strain.inc.yy(zone.near($xMidZone,0.5)) * 100
+        $max_strain = $Strain_stop($n) * 100
+        $a = string.build("%1,%2,%3,%4",$SuRat,$sigv,$max_strain,$vol_strain)
+        $l = list.append($l,$a)
+    end_loop
+    file.write($f,$l)
+    file.close($f)
+end
+[$summary]
+
+;--------------------------------------------------------------------------------------------------
+;
+model save "reconsolidated"
