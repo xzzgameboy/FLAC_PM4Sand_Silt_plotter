@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 from scipy.signal import find_peaks
-
+import math
 
 def get_full_data_flac9(filepath: str) -> pd.DataFrame:
     df = pd.read_csv(filepath)
@@ -126,3 +126,55 @@ class CDSSprocessor:
         if index == len(self.cycles_data)-1:
             print('DA not reached, using the last peak')
         self.cycle_da = self.cycles_data[index]
+
+
+def get_triggering_curve_IB08(N160cs: float, sigma_v: float, PA: float = 2016) -> list:
+    """
+    Idriss and Boulanger (2008) triggering curve
+
+    Parameters
+    ----------
+    N160cs : float
+        Corrected SPT blow count
+    sigma_v : float
+        Vertical effective stress term
+
+    Returns
+    -------
+    list[tuple[float, float]]
+        Paired values of `(N_cycles, CSR)`
+    """
+    sigma_v = sigma_v / PA
+    Csigma = min(1.0 / (18.9 - 2.55 * math.sqrt(N160cs)), 3.0)
+
+    Ksigma = min(
+        1.1,
+        1.0 - Csigma * math.log(sigma_v)
+    )
+
+    CSRmid = Ksigma * math.exp(
+        N160cs / 14.1
+        + (N160cs / 126.0) ** 2
+        - (N160cs / 23.6) ** 3
+        + (N160cs / 25.4) ** 4
+        - 2.8
+    )
+
+    IB08_cycle = []
+    IB08_CRR = []
+
+    for i in range(1, 42):
+        Mw = 5.5 + (i - 1) / 10.0
+
+        MSF = min(
+            6.9 * math.exp(-Mw / 4.0) - 0.058,
+            1.8
+        )
+
+        N_cycles = 15.0 / MSF ** (1.0 / 0.34)
+        CSR = MSF * CSRmid
+
+        IB08_cycle.append(N_cycles)
+        IB08_CRR.append(CSR)
+
+    return IB08_cycle, IB08_CRR
