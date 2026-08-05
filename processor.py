@@ -128,53 +128,107 @@ class CDSSprocessor:
         self.cycle_da = self.cycles_data[index]
 
 
-def get_triggering_curve_IB08(N160cs: float, sigma_v: float, PA: float = 2016) -> list:
+import math
+
+
+def get_triggering_curve_IB08(
+    resistance: float,
+    sigma_v_eff: float,
+    test_type: str = "SPT",
+    PA: float = 2116.2,
+) -> tuple[list[float], list[float]]:
     """
-    Idriss and Boulanger (2008) triggering curve
+    Idriss and Boulanger (2008) liquefaction-triggering curve.
 
     Parameters
     ----------
-    N160cs : float
-        Corrected SPT blow count
-    sigma_v : float
-        Vertical effective stress term
+    resistance : float
+        Corrected clean-sand penetration resistance:
+        - SPT: (N1)60cs
+        - CPT: qc1Ncs, normalized by atmospheric pressure
+
+    sigma_v_eff : float
+        Initial vertical effective stress, in the same units as PA.
+
+    test_type : str
+        Penetration test type: "SPT" or "CPT".
+
+    PA : float, default 2116.2
+        Atmospheric pressure. The default is in psf.
 
     Returns
     -------
-    list[tuple[float, float]]
-        Paired values of `(N_cycles, CSR)`
+    tuple[list[float], list[float]]
+        N_cycles and corresponding cyclic stress ratio (CSR) values.
     """
-    sigma_v = sigma_v / PA
-    Csigma = min(1.0 / (18.9 - 2.55 * math.sqrt(N160cs)), 3.0)
+    test_type = test_type.strip().upper()
+    sigma_ratio = sigma_v_eff / PA
 
-    Ksigma = min(
+    if sigma_ratio <= 0.0:
+        raise ValueError("sigma_v_eff must be greater than zero.")
+
+    if resistance < 0.0:
+        raise ValueError("resistance must be nonnegative.")
+
+    if test_type == "SPT":
+        N160cs = resistance
+
+        # Idriss and Boulanger (2008) SPT relationship
+        C_sigma = min(
+            1.0 / (18.9 - 2.55 * math.sqrt(N160cs)),
+            0.3,
+        )
+
+        CRR_7p5 = math.exp(
+            N160cs / 14.1
+            + (N160cs / 126.0) ** 2
+            - (N160cs / 23.6) ** 3
+            + (N160cs / 25.4) ** 4
+            - 2.8
+        )
+
+    elif test_type == "CPT":
+        qc1Ncs = resistance
+
+        # Idriss and Boulanger (2008) CPT relationship
+        C_sigma = min(
+            1.0 / (37.3 - 8.27 * qc1Ncs**0.264),
+            0.3,
+        )
+
+        CRR_7p5 = math.exp(
+            qc1Ncs / 113.0
+            + (qc1Ncs / 1000.0) ** 2
+            - (qc1Ncs / 140.0) ** 3
+            + (qc1Ncs / 137.0) ** 4
+            - 2.8
+        )
+
+    else:
+        raise ValueError("test_type must be either 'SPT' or 'CPT'.")
+
+    K_sigma = min(
         1.1,
-        1.0 - Csigma * math.log(sigma_v)
+        1.0 - C_sigma * math.log(sigma_ratio),
     )
 
-    CSRmid = Ksigma * math.exp(
-        N160cs / 14.1
-        + (N160cs / 126.0) ** 2
-        - (N160cs / 23.6) ** 3
-        + (N160cs / 25.4) ** 4
-        - 2.8
-    )
+    CSR_mid = K_sigma * CRR_7p5
 
-    IB08_cycle = []
-    IB08_CRR = []
+    cycles = []
+    csr_values = []
 
     for i in range(1, 42):
-        Mw = 5.5 + (i - 1) / 10.0
+        magnitude = 5.5 + (i - 1) / 10.0
 
         MSF = min(
-            6.9 * math.exp(-Mw / 4.0) - 0.058,
-            1.8
+            6.9 * math.exp(-magnitude / 4.0) - 0.058,
+            1.8,
         )
 
         N_cycles = 15.0 / MSF ** (1.0 / 0.34)
-        CSR = MSF * CSRmid
+        CSR = MSF * CSR_mid
 
-        IB08_cycle.append(N_cycles)
-        IB08_CRR.append(CSR)
+        cycles.append(N_cycles)
+        csr_values.append(CSR)
 
-    return IB08_cycle, IB08_CRR
+    return cycles, csr_values
